@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 import krpc
+import argparse
+import time
+
 from util import mission
 
 class StationMission(mission):
-    station = None
-    def doMission(self):
-        self.findStation()
+    def doMission(self,boostStage):
+        self.setTarget('Station')
         #self.waitForStationOverhead()
-        self.launch()
+        self.launch(altitude=100, boostStage=boostStage)
+        time.sleep(5)
         self.transferToStation()
-        #self.dockWithStation()
-
-    def findStation(self, name='Station'):
-        station = self.conn.space_center.target_vessel
-        if station is None or station.name != name:
-            print('looking for station: {}'.format(name))
-            self.station = self.findTarget(name)
-            self.conn.space_center.target_vessel = self.station
-        else:
-            self.station = station
+        self.dockWithStation()
 
 
     # this is iffy.  causes some werid asc behaviour
@@ -31,7 +25,7 @@ class StationMission(mission):
 
         print('waiting for station')
 
-        pos = self.conn.add_stream(self.station.position, self.vessel.reference_frame)
+        pos = self.conn.add_stream(self.target.position, self.vessel.reference_frame)
         pos.start()
 
         pos.condition.acquire()
@@ -47,30 +41,25 @@ class StationMission(mission):
             pos.condition.release()
             pos.remove()
 
-    def transferToStation(self, distance=150):
-        planner = self.mj.maneuver_planner
+    def transferToStation(self, distance=50):
+        try:
+            plane = self.plan.operation_plane
+            plane.time_selector.time_reference = self.mj.TimeReference.rel_nearest_ad
+            self.executePlan(plane,'Plane change')
+        except:
+            print('failure in plane match?')
+            pass
 
-        print('planning transfer')
-        transfer = planner.operation_transfer
-        transfer.make_node()
+        transfer = self.plan.operation_transfer
+        self.executePlan(transfer, 'transfer')
 
-        error = transfer.error_message
-        if error:
-            raise RuntimeError(error)
-
-        self.execute_node()
-
-        print("Correcting course")
-        correction = planner.operation_course_correction
+        correction = self.plan.operation_course_correction
         correction.intercept_distance = distance
-        correction.make_node()
-        self.execute_node(.01)
+        self.executePlan(correction, 'mid course correction',.01)
 
-        print("Matching speed with the target")
-        matchSpeed = planner.operation_kill_rel_vel
+        matchSpeed = self.plan.operation_kill_rel_vel
         matchSpeed.time_selector.time_reference = self.mj.TimeReference.closest_approach
-        matchSpeed.make_node()
-        self.execute_node()
+        self.executePlan(matchSpeed, 'match speed with target')
 
         print("Rendezvous complete!")
 
@@ -80,7 +69,7 @@ class StationMission(mission):
         parts.controlling = parts.docking_ports[0].part
 
         print("Looking for a free docking port attached to the target vessel")
-        for dp in self.station.parts.docking_ports:
+        for dp in self.target.parts.docking_ports:
             if not dp.docked_part:
                 print('Found docking port')
                 self.conn.space_center.target_docking_port = dp
@@ -91,11 +80,16 @@ class StationMission(mission):
 
         print("Starting the docking process")
         docking = self.mj.docking_autopilot
+        docking.force_roll = True
+        docking.roll = 0
         docking.enabled = True
         self.waitState(docking)
 
         print("Docking complete!")
 
 if __name__ == '__main__':
-    m = mission()
-    m.doMission()
+    parser = argparse.ArgumentParser(description='station intercept')
+    parser.add_argument('boostStage',type=int, default=0, help='primary boost (not circ) end stage')
+
+    args = parser.parse_args()
+    StationMission().doMission(args.boostStage)
